@@ -6,6 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
+#rosbag
+*.bag
+
 # Distribution / packaging
 .Python
 build/

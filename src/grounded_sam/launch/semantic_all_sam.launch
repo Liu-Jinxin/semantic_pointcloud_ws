@@ -1,0 +1,22 @@
+<launch>
+    <!-- Grounded SAM Service Node -->
+    <node pkg="grounded_sam" type="ram_sam_ros_wrapper.py" name="ram_sam_ros_node" output="screen">
+        <!-- Parameters -->
+        <param name="~mask_callback_timer" value="1" />
+        <param name="~raw_image_topic_name" value="/camera/color/image_raw" />
+        <param name="~mask_image_topic_name" value="/semantic_mask_image" />
+        <param name="~mask_tag_topic_name" value="/semantic_mask_tag" />
+        <param name="~config" value="$(find grounded_sam)/script/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py" />
+        <param name="~ram_checkpoint" value="$(find grounded_sam)/script/Tag2Text/ram_swin_large_14m.pth" />
+        <param name="~grounded_checkpoint" value="$(find grounded_sam)/script/groundingdino_swint_ogc.pth" />
+        <param name="~sam_checkpoint" value="$(find grounded_sam)/script/sam_vit_h_4b8939.pth" />
+        <param name="~sam_hq_checkpoint" value="$(find grounded_sam)/script/sam_hq_vit_b.pth"/>
+        <param name="~split" value=","/>
+        <!-- <param name="~openai_key" value="your_openai_key" default="None" /> -->
+        <!-- <param name="~openai_proxy" value="your_openai_proxy" default="None" /> -->
+        <param name="~box_threshold" value="0.25" />
+        <param name="~text_threshold" value="0.2" />
+        <param name="~iou_threshold" value="0.5" />
+        <param name="~device" value="cuda" />
+    </node>
+</launch>

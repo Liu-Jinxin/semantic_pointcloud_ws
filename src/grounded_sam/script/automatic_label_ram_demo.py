@@ -322,4 +322,4 @@ if __name__ == "__main__":
         bbox_inches="tight", dpi=300, pad_inches=0.0
     )
 
-    #save_mask_data(output_dir, tags_chinese, masks, boxes_filt, pred_phrases)
+    save_mask_data(output_dir, tags_chinese, masks, boxes_filt, pred_phrases)

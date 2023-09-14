@@ -4,18 +4,22 @@ from sensor_msgs.msg import Image as ROSImage
 from grounded_sam.msg import StringArrayStamped
 from std_msgs.msg import String, Header
 from cv_bridge import CvBridge, CvBridgeError
+
 import argparse
 import os
-import numpy as np
-import torch
-import torchvision
-import matplotlib.cm as cm
-from PIL import Image as PILImage
+import copy
 import re
+
+import numpy as np
+import json
+import torch
+from PIL import Image as PILImage
+from PIL import ImageDraw, ImageFont
 
 # Grounding DINO
 import GroundingDINO.groundingdino.datasets.transforms as T
 from GroundingDINO.groundingdino.models import build_model
+from GroundingDINO.groundingdino.util import box_ops
 from GroundingDINO.groundingdino.util.slconfig import SLConfig
 from GroundingDINO.groundingdino.util.utils import (
     clean_state_dict,
@@ -27,19 +31,13 @@ from segment_anything import build_sam, build_sam_hq, SamPredictor
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-
-# Recognize Anything Model & Tag2Text
-import sys
-sys.path.append("/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/Tag2Text")
-from Tag2Text.models import tag2text
-from Tag2Text import inference_ram
-import torchvision.transforms as TS
+import matplotlib.cm as cm
 
 
-class RamSamServiceNode:
+class DinoSamServiceNode:
     def __init__(self):
         # ROS Initialization
-        rospy.init_node("ram_sam_service_node")
+        rospy.init_node("dino_sam_service_node")
         # To store the latest image
         self.bridge = CvBridge()
         self.latest_image_msg = ROSImage()
@@ -48,7 +46,6 @@ class RamSamServiceNode:
             # Load all models
             (
                 self.grounding_dino_model,
-                self.ram_model,
                 self.sam_predictor,
             ) = self.load_all_models()
             # ROS Publishers Subscribers and Timer
@@ -61,7 +58,9 @@ class RamSamServiceNode:
             self.image_subscriber = rospy.Subscriber(
                 self.raw_image_topic_name, ROSImage, self.image_callback
             )
-            self.timer = rospy.Timer(rospy.Duration(self.mask_callback_timer), self.timer_callback)
+            self.timer = rospy.Timer(
+                rospy.Duration(self.mask_callback_timer), self.timer_callback
+            )
         except Exception as e:
             rospy.logerr(f"Error during initialization: {e}")
             rospy.signal_shutdown("Error during initialization")
@@ -85,12 +84,12 @@ class RamSamServiceNode:
         return float(value)
 
     def check_and_get_parameters(self):
+        self.text_prompt = self.get_required_param("~text_prompt")
         self.mask_callback_timer = self.get_float_param("~mask_callback_timer")
         self.mask_image_topic_name = self.get_required_param("~mask_image_topic_name")
         self.mask_tag_topic_name = self.get_required_param("~mask_tag_topic_name")
         self.raw_image_topic_name = self.get_required_param("~raw_image_topic_name")
         self.config = self.get_required_param("~config")
-        self.ram_checkpoint = self.get_required_param("~ram_checkpoint")
         self.grounded_checkpoint = self.get_required_param("~grounded_checkpoint")
         self.sam_checkpoint = self.get_required_param("~sam_checkpoint")
         self.sam_hq_checkpoint = self.get_required_param("~sam_hq_checkpoint")
@@ -104,7 +103,7 @@ class RamSamServiceNode:
         # self.openai_key = self.get_required_param("~openai_key", default=None)
         # self.openai_proxy = self.get_required_param("~openai_proxy", default=None)
         # self.output_dir = self.get_required_param("~output_dir")
-        
+
     def load_grounding_dino_model(self):
         args = SLConfig.fromfile(self.config)
         args.device = self.device
@@ -113,13 +112,6 @@ class RamSamServiceNode:
         model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
         model = model.eval().to(self.device)
         return model
-
-    def load_ram_model(self):
-        ram_model = tag2text.ram(
-            pretrained=self.ram_checkpoint, image_size=384, vit="swin_l"
-        )
-        ram_model = ram_model.eval().to(self.device)
-        return ram_model
 
     def load_sam_model(self):
         if self.use_sam_hq:
@@ -134,9 +126,8 @@ class RamSamServiceNode:
 
     def load_all_models(self):
         grounding_dino_model = self.load_grounding_dino_model()
-        ram_model = self.load_ram_model()
         sam_predictor = self.load_sam_model()
-        return grounding_dino_model, ram_model, sam_predictor
+        return grounding_dino_model, sam_predictor
 
     def show_mask(self, mask, ax, random_color=False):
         if random_color:
@@ -193,7 +184,14 @@ class RamSamServiceNode:
         self.generate_mask_and_tags(self.latest_image_msg)
 
     def get_grounding_output(
-        self, model, image, caption, box_threshold, text_threshold, device="cuda"
+        self,
+        model,
+        image,
+        caption,
+        box_threshold,
+        text_threshold,
+        with_logits=True,
+        device="cuda",
     ):
         caption = caption.lower()
         caption = caption.strip()
@@ -220,22 +218,22 @@ class RamSamServiceNode:
         tokenized = tokenlizer(caption)
         # build pred
         pred_phrases = []
-        scores = []
         for logit, box in zip(logits_filt, boxes_filt):
             pred_phrase = get_phrases_from_posmap(
                 logit > text_threshold, tokenized, tokenlizer
             )
-            pred_phrases.append(pred_phrase + f"({str(logit.max().item())[:4]})")
-            scores.append(logit.max().item())
+            if with_logits:
+                pred_phrases.append(pred_phrase + f"({str(logit.max().item())[:4]})")
+            else:
+                pred_phrases.append(pred_phrase)
 
-        return boxes_filt, torch.Tensor(scores), pred_phrases
+        return boxes_filt, pred_phrases
 
     def load_image_from_msg(self, image_msg):
         # Check if the image message has a valid encoding
         if not image_msg.encoding:
             rospy.logerr("Received image message with empty encoding!")
             return None, None
-
         # Convert sensor_msgs/Image to PIL Image
         try:
             cv_image = self.bridge.imgmsg_to_cv2(image_msg, "rgb8")
@@ -256,33 +254,17 @@ class RamSamServiceNode:
 
     def generate_mask_and_tags(self, image_msg):
         image_pil, image = self.load_image_from_msg(image_msg)
-        normalize = TS.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        transform = TS.Compose([TS.Resize((384, 384)), TS.ToTensor(), normalize])
-
-        raw_image = image_pil.resize((384, 384))
-        raw_image = transform(raw_image).unsqueeze(0).to(self.device)
-
-        # Get tags using RAM model
-        res = inference_ram.inference(raw_image, self.ram_model)
-
-        # Currently ", " is better for detecting single tags
-        # while ". " is a little worse in some case
-        tags = res[0].replace(" |", ",")
-        # print("Image Tags: ", res[0])
-
-        # Grounding DINO
-        boxes_filt, scores, pred_phrases = self.get_grounding_output(
+        # Get grounding output
+        boxes_filt, pred_phrases = self.get_grounding_output(
             self.grounding_dino_model,
             image,
-            tags,
+            self.text_prompt,
             self.box_threshold,
             self.text_threshold,
             device=self.device,
         )
-
         # Initialize SAM
         predictor = self.sam_predictor
-
         try:
             # Convert ROS Image message to OpenCV image (in BGR format)
             image_cv = self.bridge.imgmsg_to_cv2(image_msg, "bgr8")
@@ -299,15 +281,6 @@ class RamSamServiceNode:
             boxes_filt[i][2:] += boxes_filt[i][:2]
 
         boxes_filt = boxes_filt.cpu()
-        # use NMS to handle overlapped boxes
-        # print(f"Before NMS: {boxes_filt.shape[0]} boxes")
-        nms_idx = (
-            torchvision.ops.nms(boxes_filt, scores, self.iou_threshold).numpy().tolist()
-        )
-        boxes_filt = boxes_filt[nms_idx]
-        pred_phrases = [pred_phrases[idx] for idx in nms_idx]
-        # print(f"After NMS: {boxes_filt.shape[0]} boxes")
-
         transformed_boxes = predictor.transform.apply_boxes_torch(
             boxes_filt, image.shape[:2]
         ).to(self.device)
@@ -318,19 +291,6 @@ class RamSamServiceNode:
             boxes=transformed_boxes.to(self.device),
             multimask_output=False,
         )
-        # draw output image
-        # plt.figure(figsize=(10, 10))
-        # image_np = image
-        # plt.imshow(image_np)
-        # for mask in masks:
-        #     self.show_mask(mask.cpu().numpy(), plt.gca(), random_color=True)
-        # for box, label in zip(boxes_filt, pred_phrases):
-        #     self.show_box(box.numpy(), plt.gca(), label)
-        # plt.axis('off')
-        # plt.savefig(
-        #     os.path.join("/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/outputs/", "rosnewresults.jpg"),
-        #     bbox_inches="tight", dpi=300, pad_inches=0.0
-        # )
         value = 0  # 0 for background
 
         mask_img = torch.zeros(masks.shape[-2:])
@@ -364,5 +324,5 @@ class RamSamServiceNode:
 
 
 if __name__ == "__main__":
-    node = RamSamServiceNode()
+    node = DinoSamServiceNode()
     rospy.spin()
