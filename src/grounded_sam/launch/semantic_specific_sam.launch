@@ -3,7 +3,7 @@
     <node pkg="grounded_sam" type="dino_sam_ros_wrapper.py" name="dino_sam_ros_node" output="screen">
         <!-- Parameters -->
         <param name="~text_prompt" value="Keyborad. Ruler." />
-        <param name="~mask_callback_timer" value="1" />
+        <param name="~mask_callback_timer" value="0.1" />
         <param name="~raw_image_topic_name" value="/camera/color/image_raw" />
         <param name="~mask_image_topic_name" value="/semantic_mask_image" />
         <param name="~mask_tag_topic_name" value="/semantic_mask_tag" />

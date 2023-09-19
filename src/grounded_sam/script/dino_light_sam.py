@@ -7,19 +7,21 @@ import torchvision
 
 from groundingdino.util.inference import Model
 from segment_anything import SamPredictor
-from LightHQSAM.setup_light_hqsam import setup_model
+import sys
+sys.path.append("/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/EfficientSAM")
+from EfficientSAM.LightHQSAM.setup_light_hqsam import setup_model
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # GroundingDINO config and checkpoint
-GROUNDING_DINO_CONFIG_PATH = "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-GROUNDING_DINO_CHECKPOINT_PATH = "./groundingdino_swint_ogc.pth"
+GROUNDING_DINO_CONFIG_PATH = "/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+GROUNDING_DINO_CHECKPOINT_PATH = "/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/groundingdino_swint_ogc.pth"
 
 # Building GroundingDINO inference model
 grounding_dino_model = Model(model_config_path=GROUNDING_DINO_CONFIG_PATH, model_checkpoint_path=GROUNDING_DINO_CHECKPOINT_PATH)
 
 # Building MobileSAM predictor
-HQSAM_CHECKPOINT_PATH = "./EfficientSAM/sam_hq_vit_tiny.pth"
+HQSAM_CHECKPOINT_PATH = "/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/EfficientSAM/sam_hq_vit_tiny.pth"
 checkpoint = torch.load(HQSAM_CHECKPOINT_PATH)
 light_hqsam = setup_model()
 light_hqsam.load_state_dict(checkpoint, strict=True)
@@ -106,4 +108,4 @@ annotated_image = mask_annotator.annotate(scene=image.copy(), detections=detecti
 annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
 
 # save the annotated grounded-sam image
-cv2.imwrite("EfficientSAM/LightHQSAM/grounded_light_hqsam_annotated_image.jpg", annotated_image)
+cv2.imwrite("/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/outputs/rounded_light_hqsam_annotated_image111.jpg", annotated_image)

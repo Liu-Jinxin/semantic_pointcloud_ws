@@ -15,11 +15,12 @@ from GroundingDINO.groundingdino.util.slconfig import SLConfig
 from GroundingDINO.groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 
 # segment anything
-from segment_anything import (
-    build_sam,
-    build_sam_hq,
-    SamPredictor
-)
+from segment_anything import sam_model_registry, SamPredictor
+import sys
+sys.path.append("/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/SegmentAnythingTensorRT")
+from SegmentAnythingTensorRT.src import utils
+import tensorrt as trt
+
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -189,28 +190,76 @@ if __name__ == "__main__":
     )
 
     # initialize SAM
-    if use_sam_hq:
-        predictor = SamPredictor(build_sam_hq(checkpoint=sam_hq_checkpoint).to(device))
-    else:
-        predictor = SamPredictor(build_sam(checkpoint=sam_checkpoint).to(device))
+    model_type = "vit_b"
+    sam = sam_model_registry[model_type](checkpoint="/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/SegmentAnythingTensorRT/pth_model/sam_vit_b_01ec64.pth")
+    predictor = SamPredictor(sam.to("cuda"))
+    del sam
+    TRT_LOGGER = trt.Logger()
+    runtime = trt.Runtime(TRT_LOGGER)
+
+    trt_model = "/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/SegmentAnythingTensorRT/exported_models/vit_b/model_fp32.engine"
+    if not os.path.isfile(trt_model):
+        raise FileNotFoundError(f"Could not find model in path\n{trt_model}")
+    with open(trt_model, "rb") as f:
+        serialized_engine = f.read()
+
+    engine = runtime.deserialize_cuda_engine(serialized_engine)
+    context = engine.create_execution_context()
+
+    inputs, outputs, bindings, stream = utils.allocate_buffers(engine, max_batch_size=1)
+
     image = cv2.imread(image_path)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    predictor.set_image(image)
 
+    pixel_mean = torch.tensor([123.675, 116.28, 103.53])
+    pixel_std = torch.tensor([58.395, 57.12, 57.375])
+    img_size = 1024
+    input_for_onnx = utils.preprocess_image(
+        image, 1024, "cpu", pixel_mean, pixel_std, img_size
+    )
+
+    utils.load_img_to_input_buffer(
+        input_for_onnx, pagelocked_buffer=inputs[0].host
+    )
+    [output] = utils.do_inference_v2(
+            context,
+            bindings=bindings,
+            inputs=inputs,
+            outputs=outputs,
+            stream=stream,
+        )
+    output = output.reshape((1, 256, 64, 64))
+    predictor.set_image(
+            image, embeddings=torch.tensor(output).to("cuda")
+        )
     size = image_pil.size
     H, W = size[1], size[0]
+    if not isinstance(boxes_filt, torch.Tensor):
+        boxes_filt = torch.tensor(boxes_filt)
+
     for i in range(boxes_filt.size(0)):
         boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
         boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
         boxes_filt[i][2:] += boxes_filt[i][:2]
+    
+    boxes_filt = boxes_filt.to(device)
 
-    boxes_filt = boxes_filt.cpu()
-    transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image.shape[:2]).to(device)
+    if not isinstance(boxes_filt, torch.Tensor):
+        boxes_filt = torch.tensor(boxes_filt).to(device)
+    else:
+        boxes_filt = boxes_filt.to(device)
 
-    masks, _, _ = predictor.predict_torch(
+    transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image.shape[:2])
+
+    if not isinstance(transformed_boxes, torch.Tensor):
+        transformed_boxes = torch.tensor(transformed_boxes).to(device)
+    else:
+        transformed_boxes = transformed_boxes.to(device)
+
+    masks, _, _ = predictor.predict(
         point_coords = None,
         point_labels = None,
-        boxes = transformed_boxes.to(device),
+        box = transformed_boxes.numpy(),
         multimask_output = False,
     )
     
@@ -229,4 +278,3 @@ if __name__ == "__main__":
     )
 
     save_mask_data(output_dir, masks, boxes_filt, pred_phrases)
-
