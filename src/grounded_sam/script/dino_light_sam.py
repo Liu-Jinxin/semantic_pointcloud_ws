@@ -10,6 +10,7 @@ from segment_anything import SamPredictor
 import sys
 sys.path.append("/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/EfficientSAM")
 from EfficientSAM.LightHQSAM.setup_light_hqsam import setup_model
+from ByteTrack.yolox.tracker.byte_tracker import BYTETracker
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -32,7 +33,7 @@ sam_predictor = SamPredictor(light_hqsam)
 
 # Predict classes and hyper-param for GroundingDINO
 SOURCE_IMAGE_PATH = "/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/outputs/desk_top3.jpg"
-CLASSES = ["keyboard", "ruler", "bottle", "ball", "cube", "wireless controller", "scissors", "paper"]
+CLASSES = ["keyboard", "ruler", "bottle", "cube", "wireless controller", "scissors", "paper"]
 BOX_THRESHOLD = 0.3
 TEXT_THRESHOLD = 0.25
 NMS_THRESHOLD = 0.8
@@ -40,7 +41,7 @@ NMS_THRESHOLD = 0.8
 
 # load image
 image = cv2.imread(SOURCE_IMAGE_PATH)
-
+image_H, image_W = image.shape[:2]
 # detect objects
 detections = grounding_dino_model.predict_with_classes(
     image=image,
@@ -74,6 +75,24 @@ detections.confidence = detections.confidence[nms_idx]
 detections.class_id = detections.class_id[nms_idx]
 
 print(f"After NMS: {len(detections.xyxy)} boxes")
+
+print("detected classes:", detections)
+class Args:
+    def __init__(self):
+        self.track_thresh = 0.2
+        self.track_buffer = 30
+        self.match_thresh = 0.5
+        self.mot20 = False
+
+args = Args()
+tracker = BYTETracker(track_thresh = 0.2, track_buffer = 30, match_thresh = 0.5, mot20 = False)
+
+confidence_reshaped = detections.confidence[:, np.newaxis]
+dets = np.hstack((detections.xyxy, confidence_reshaped))
+print("dets:", dets)
+
+online_targets = tracker.update(dets, [image_H, image_W], [image_H, image_W])
+print("online_targets:", online_targets)
 
 # Prompting SAM with detected boxes
 def segment(sam_predictor: SamPredictor, image: np.ndarray, xyxy: np.ndarray) -> np.ndarray:

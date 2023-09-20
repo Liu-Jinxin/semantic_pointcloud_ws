@@ -2,10 +2,12 @@
 import rospy
 from sensor_msgs.msg import Image as ROSImage
 from grounded_sam.msg import StringArrayStamped
+from ByteTrack.yolox.tracker.byte_tracker import BYTETracker
 from std_msgs.msg import String, Header
 from cv_bridge import CvBridge, CvBridgeError
 import re
 import yaml
+import types
 import matplotlib.cm as cm
 
 import cv2
@@ -42,6 +44,7 @@ class LightHQSamServiceNode:
             (
                 self.grounding_dino_model,
                 self.light_hqsam_predictor,
+                self.byte_tracker,
             ) = self.load_all_models()
             # ROS Publishers Subscribers and Timer
             self.mask_publisher = rospy.Publisher(
@@ -91,6 +94,10 @@ class LightHQSamServiceNode:
         self.box_threshold = self.get_float_param("~box_threshold", default=0.3)
         self.text_threshold = self.get_float_param("~text_threshold", default=0.25)
         self.nms_threshold = self.get_float_param("~nms_threshold", default=0.8)
+        self.track_thresh = self.get_float_param("~track_thresh", default=0.2)
+        self.track_buffer = self.get_float_param("~track_buffer", default=30)
+        self.match_thresh = self.get_float_param("~match_thresh", default=0.5)
+        self.mot20 = False
         self.device = self.get_required_param("~device", default="cuda")
 
     def load_grounding_dino(self):
@@ -107,11 +114,21 @@ class LightHQSamServiceNode:
         light_hqsam.to(device=self.device)
         sam_predictor = SamPredictor(light_hqsam)
         return sam_predictor
+    
+    def load_byte_tracker(self):
+        args = types.SimpleNamespace()
+        args.track_thresh = self.track_thresh
+        args.track_buffer = self.track_buffer
+        args.match_thresh = self.match_thresh
+        args.mot20 = self.mot20
+        tracker = BYTETracker(args)
+        return tracker
 
     def load_all_models(self):
         grounding_dino_model = self.load_grounding_dino()
         sam_predictor = self.load_light_hqsam()
-        return grounding_dino_model, sam_predictor
+        byte_tracker = self.load_byte_tracker()
+        return grounding_dino_model, sam_predictor, byte_tracker
 
     def image_callback(self, image_msg):
         self.latest_image_msg = image_msg
@@ -162,6 +179,7 @@ class LightHQSamServiceNode:
         except CvBridgeError as e:
             rospy.logerr(f"Error when converting image: {e}")
             return
+        image_H, image_W = cv_image.shape[:2]
         # detect objects
         detections = self.grounding_dino_model.predict_with_classes(
             image=cv_image,
@@ -182,6 +200,15 @@ class LightHQSamServiceNode:
         detections.xyxy = detections.xyxy[nms_idx]
         detections.confidence = detections.confidence[nms_idx]
         detections.class_id = detections.class_id[nms_idx]
+
+        print("detected classes:", detections)
+
+        confidence_reshaped = detections.confidence[:, np.newaxis]
+        dets = np.hstack((detections.xyxy, confidence_reshaped))
+        print("dets:", dets)
+
+        online_targets = self.byte_tracker.update(dets, [image_H, image_W], [image_H, image_W])
+        print("online_targets:", online_targets)
 
         cv_image_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
         detections.mask = self.sam_segment(
