@@ -1,0 +1,15 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "ROS: Debug Launch File",
+            "request": "debug_launch",
+            "target": "/home/appusr/semantic_pointcloud_ws/src/grounded_sam/launch/semantic_light_sam.launch",
+            "pythonPath": "/root/miniconda3/envs/ros/bin/python",
+            "type": "ros"
+        }
+    ]
+}

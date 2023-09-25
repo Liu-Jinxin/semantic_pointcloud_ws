@@ -114,7 +114,7 @@ class LightHQSamServiceNode:
         light_hqsam.to(device=self.device)
         sam_predictor = SamPredictor(light_hqsam)
         return sam_predictor
-    
+
     def load_byte_tracker(self):
         args = types.SimpleNamespace()
         args.track_thresh = self.track_thresh
@@ -201,14 +201,34 @@ class LightHQSamServiceNode:
         detections.confidence = detections.confidence[nms_idx]
         detections.class_id = detections.class_id[nms_idx]
 
-        print("detected classes:", detections)
-
+        # tlwh = np.zeros_like(detections.xyxy)
+        # tlwh[:, 0] = detections.xyxy[:, 0]  # top-left x
+        # tlwh[:, 1] = detections.xyxy[:, 1]  # top-left y
+        # tlwh[:, 2] = detections.xyxy[:, 2] - detections.xyxy[:, 0]  # width
+        # tlwh[:, 3] = detections.xyxy[:, 3] - detections.xyxy[:, 1]  # height
+        # print("tlwh:", tlwh)
         confidence_reshaped = detections.confidence[:, np.newaxis]
         dets = np.hstack((detections.xyxy, confidence_reshaped))
         print("dets:", dets)
 
-        online_targets = self.byte_tracker.update(dets, [image_H, image_W], [image_H, image_W])
+        online_targets = self.byte_tracker.update(
+            dets, [image_H, image_W], [image_H, image_W]
+        )
         print("online_targets:", online_targets)
+        # print('dir', dir(online_targets))
+        # exec ID
+        tracker_ids = [target.track_id for target in online_targets]
+        print("tracker_ids:", tracker_ids)
+        tracker_xyxy = [target._tlwh for target in online_targets]
+        print("tracker_xyxy:", tracker_xyxy)
+
+        # Extend tracker_ids with -1 values to match the length of detections
+        tracker_ids.extend([-1] * (len(detections) - len(tracker_ids)))
+
+        # add the tracker id to detections
+        detections.tracker_id = tracker_ids
+
+        print("detections", detections)
 
         cv_image_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
         detections.mask = self.sam_segment(
@@ -219,36 +239,45 @@ class LightHQSamServiceNode:
 
         labels = [
             f"{self.text_prompt[class_id]} {confidence:0.2f}"
-            for _, _, confidence, class_id, _ in detections
+            + (f" ID:{tracker_id}" if tracker_id != -1 else "")
+            for _, confidence, class_id, tracker_id in zip(
+                detections.xyxy,
+                detections.confidence,
+                detections.class_id,
+                detections.tracker_id,
+            )
         ]
+
         # print("labels: ", labels)
         # print("detections: ", detections)
-        # annotated_image = self.mask_annotator.annotate(
-        #     scene=cv_image.copy(), detections=detections
-        # )
-        # annotated_image = self.box_annotator.annotate(
-        #     scene=annotated_image, detections=detections, labels=labels
-        # )
+        annotated_image = self.mask_annotator.annotate(
+            scene=cv_image.copy(), detections=detections
+        )
+        annotated_image = self.box_annotator.annotate(
+            scene=annotated_image, detections=detections, labels=labels
+        )
         # Get the viridis colormap using the recommended method
-        viridis = cm.viridis
+        # viridis = cm.viridis
 
-        # Create an empty color image
-        color_mask = np.zeros((cv_image.shape[0], cv_image.shape[1], 3), dtype=np.uint8)
+        # # Create an empty color image
+        # color_mask = np.zeros((cv_image.shape[0], cv_image.shape[1], 3), dtype=np.uint8)
 
-        # Calculate the number of unique class IDs
-        num_classes = len(np.unique(detections.class_id))
+        # # Calculate the number of unique class IDs
+        # num_classes = len(np.unique(detections.class_id))
 
-        # Fill the color image with the masks of each detected object
-        for mask, class_id in zip(detections.mask, detections.class_id):
-            # Normalize the class ID to get a value between 0 and 1
-            normalized_value = class_id / float(num_classes)
-            # Get the RGB color from the viridis colormap and convert to a NumPy array
-            color = np.array(viridis(normalized_value)[:3]) * 255
-            color_mask[mask] = color.astype(np.uint8)[::-1]  # Convert RGB to BGR
+        # # Fill the color image with the masks of each detected object
+        # for mask, class_id in zip(detections.mask, detections.class_id):
+        #     # Normalize the class ID to get a value between 0 and 1
+        #     normalized_value = class_id / float(num_classes)
+        #     # Get the RGB color from the viridis colormap and convert to a NumPy array
+        #     color = np.array(viridis(normalized_value)[:3]) * 255
+        #     color_mask[mask] = color.astype(np.uint8)[::-1]  # Convert RGB to BGR
 
         # Publish the color mask image
         try:
-            self.mask_publisher.publish(self.bridge.cv2_to_imgmsg(color_mask, "bgr8"))
+            self.mask_publisher.publish(
+                self.bridge.cv2_to_imgmsg(annotated_image, "bgr8")
+            )
         except CvBridgeError as e:
             rospy.logerr(f"Error when converting image: {e}")
             return

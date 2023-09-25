@@ -13,5 +13,13 @@
             "/home/appusr/semantic_pointcloud_ws/devel/lib/python3/dist-packages",
             "/opt/ros/noetic/lib/python3/dist-packages"
         ]
-    }
+    },
+    "python.autoComplete.extraPaths": [
+        "/home/appusr/semantic_pointcloud_ws/devel/lib/python3/dist-packages",
+        "/opt/ros/noetic/lib/python3/dist-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/appusr/semantic_pointcloud_ws/devel/lib/python3/dist-packages",
+        "/opt/ros/noetic/lib/python3/dist-packages"
+    ]
 }
