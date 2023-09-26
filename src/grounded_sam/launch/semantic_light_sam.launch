@@ -14,9 +14,9 @@
         <param name="~box_threshold" value="0.35" />
         <param name="~text_threshold" value="0.35" />
         <param name="~nms_threshold" value="0.8" />
-        <param name="~track_thresh" value="0.1" />
+        <param name="~track_thresh" value="0.2" />
         <param name="~track_buffer" value="30" />
-        <param name="~match_thresh" value="0.6" />
+        <param name="~match_thresh" value="0.5" />
         <param name="~device" value="cuda" />
     </node>
 </launch>

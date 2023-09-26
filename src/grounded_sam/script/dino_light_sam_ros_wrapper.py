@@ -208,9 +208,15 @@ class LightHQSamServiceNode:
         # tlwh[:, 3] = detections.xyxy[:, 3] - detections.xyxy[:, 1]  # height
         # print("tlwh:", tlwh)
         confidence_reshaped = detections.confidence[:, np.newaxis]
-        dets = np.hstack((detections.xyxy, confidence_reshaped))
+        bounding_box_reshaped = np.copy(detections.xyxy) 
+        bounding_box_reshaped[:, [0, 2]] /= image_W
+        bounding_box_reshaped[:, [1, 3]] /= image_H
+        dets = np.hstack((bounding_box_reshaped, confidence_reshaped))
+        indices = np.arange(len(dets))
+        dets = np.hstack((dets, indices[:, np.newaxis]))
         print("dets:", dets)
-
+        print("image_H:", image_H)
+        print("image_W:", image_W)
         online_targets = self.byte_tracker.update(
             dets, [image_H, image_W], [image_H, image_W]
         )
@@ -219,14 +225,17 @@ class LightHQSamServiceNode:
         # exec ID
         tracker_ids = [target.track_id for target in online_targets]
         print("tracker_ids:", tracker_ids)
-        tracker_xyxy = [target._tlwh for target in online_targets]
-        print("tracker_xyxy:", tracker_xyxy)
+        tracker_tlwh = [target._tlwh for target in online_targets]
+        print("tracker_tlwh:", tracker_tlwh)
+        tracker_indices = [target.index for target in online_targets]
+        print("tracker_indices:", tracker_indices)
 
-        # Extend tracker_ids with -1 values to match the length of detections
-        tracker_ids.extend([-1] * (len(detections) - len(tracker_ids)))
+        # Assume each detection doesn't have a tracker id initially
+        detections.tracker_id = [-1] * len(detections.xyxy)
 
-        # add the tracker id to detections
-        detections.tracker_id = tracker_ids
+        # Assign the tracker ids according to the indices from online_targets
+        for idx, track_id in zip(tracker_indices, tracker_ids):
+            detections.tracker_id[int(idx)] = track_id
 
         print("detections", detections)
 

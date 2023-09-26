@@ -8,7 +8,7 @@
             "name": "ROS: Debug Launch File",
             "request": "debug_launch",
             "target": "/home/appusr/semantic_pointcloud_ws/src/grounded_sam/launch/semantic_light_sam.launch",
-            "pythonPath": "/root/miniconda3/envs/ros/bin/python",
+            "python": "/root/miniconda3/envs/ros/bin/python",
             "type": "ros"
         }
     ]
