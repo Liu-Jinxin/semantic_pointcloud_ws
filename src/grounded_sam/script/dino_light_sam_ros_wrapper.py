@@ -170,22 +170,21 @@ class LightHQSamServiceNode:
             result_masks.append(masks[index])
         return np.array(result_masks)
 
-    def generate_mask_and_tags(self, image_msg):
-        # Convert image_msg to cv2 image
+    def convert_image_msg_to_cv(self, image_msg):
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(image_msg, "bgr8")
+            return self.bridge.imgmsg_to_cv2(image_msg, "bgr8")
         except CvBridgeError as e:
             rospy.logerr(f"Error when converting image: {e}")
-            return
-        image_H, image_W = cv_image.shape[:2]
-        # detect objects
+            return None
+
+    def get_detections(self, cv_image):
         detections = self.grounding_dino_model.predict_with_classes(
             image=cv_image,
             classes=self.text_prompt,
             box_threshold=self.box_threshold,
             text_threshold=self.text_threshold,
         )
-        # NMS post process
+
         nms_idx = (
             torchvision.ops.nms(
                 torch.from_numpy(detections.xyxy),
@@ -195,55 +194,33 @@ class LightHQSamServiceNode:
             .numpy()
             .tolist()
         )
+
         detections.xyxy = detections.xyxy[nms_idx]
         detections.confidence = detections.confidence[nms_idx]
         detections.class_id = detections.class_id[nms_idx]
+        return detections
 
-        # tlwh = np.zeros_like(detections.xyxy)
-        # tlwh[:, 0] = detections.xyxy[:, 0]  # top-left x
-        # tlwh[:, 1] = detections.xyxy[:, 1]  # top-left y
-        # tlwh[:, 2] = detections.xyxy[:, 2] - detections.xyxy[:, 0]  # width
-        # tlwh[:, 3] = detections.xyxy[:, 3] - detections.xyxy[:, 1]  # height
-        # print("tlwh:", tlwh)
+    def reshape_detections(self, detections, image_H, image_W):
         confidence_reshaped = detections.confidence[:, np.newaxis]
         bounding_box_reshaped = np.copy(detections.xyxy)
         bounding_box_reshaped[:, [0, 2]] /= image_W
         bounding_box_reshaped[:, [1, 3]] /= image_H
         dets = np.hstack((bounding_box_reshaped, confidence_reshaped))
         indices = np.arange(len(dets))
-        dets = np.hstack((dets, indices[:, np.newaxis]))
-        print("dets:", dets)
-        print("image_H:", image_H)
-        print("image_W:", image_W)
-        online_targets = self.byte_tracker.update(
-            dets, [image_H, image_W], [image_H, image_W]
-        )
-        print("online_targets:", online_targets)
-        # print('dir', dir(online_targets))
-        # exec ID
-        tracker_ids = [target.track_id for target in online_targets]
-        print("tracker_ids:", tracker_ids)
-        tracker_tlwh = [target._tlwh for target in online_targets]
-        print("tracker_tlwh:", tracker_tlwh)
-        tracker_indices = [target.index for target in online_targets]
-        print("tracker_indices:", tracker_indices)
+        return np.hstack((dets, indices[:, np.newaxis]))
 
+    def assign_tracker_ids(self, detections, online_targets):
         # Assume each detection doesn't have a tracker id initially
         detections.tracker_id = [-1] * len(detections.xyxy)
 
         # Assign the tracker ids according to the indices from online_targets
+        tracker_ids = [target.track_id for target in online_targets]
+        tracker_indices = [target.index for target in online_targets]
+
         for idx, track_id in zip(tracker_indices, tracker_ids):
             detections.tracker_id[int(idx)] = track_id
 
-        print("detections", detections)
-
-        cv_image_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-        detections.mask = self.sam_segment(
-            self.light_hqsam_predictor, cv_image_rgb, detections.xyxy
-        )
-
-        # annotate image with detections
-
+    def annotate_image(self, cv_image, detections):
         labels = [
             f"{self.text_prompt[class_id]} {confidence:0.2f}"
             + (f" ID:{tracker_id}" if tracker_id != -1 else "")
@@ -255,48 +232,37 @@ class LightHQSamServiceNode:
             )
         ]
 
-        # print("labels: ", labels)
-        # print("detections: ", detections)
-        annotated_image = self.mask_annotator.annotate(
-            scene=cv_image.copy(), detections=detections
-        )
-        annotated_image = self.box_annotator.annotate(
-            scene=annotated_image, detections=detections, labels=labels
-        )
-        # Get the viridis colormap using the recommended method
-        # viridis = cm.viridis
+        annotated_image = self.mask_annotator.annotate(cv_image.copy(), detections)
+        return self.box_annotator.annotate(annotated_image, detections, labels)
 
-        # # Create an empty color image
-        # color_mask = np.zeros((cv_image.shape[0], cv_image.shape[1], 3), dtype=np.uint8)
-
-        # # Calculate the number of unique class IDs
-        # num_classes = len(np.unique(detections.class_id))
-
-        # # Fill the color image with the masks of each detected object
-        # for mask, class_id in zip(detections.mask, detections.class_id):
-        #     # Normalize the class ID to get a value between 0 and 1
-        #     normalized_value = class_id / float(num_classes)
-        #     # Get the RGB color from the viridis colormap and convert to a NumPy array
-        #     color = np.array(viridis(normalized_value)[:3]) * 255
-        #     color_mask[mask] = color.astype(np.uint8)[::-1]  # Convert RGB to BGR
-
-        # Publish the color mask image
+    def publish_image(self, cv_image):
         try:
-            self.mask_publisher.publish(
-                self.bridge.cv2_to_imgmsg(annotated_image, "bgr8")
-            )
+            self.mask_publisher.publish(self.bridge.cv2_to_imgmsg(cv_image, "bgr8"))
         except CvBridgeError as e:
             rospy.logerr(f"Error when converting image: {e}")
+
+    def generate_mask_and_tags(self, image_msg):
+        cv_image = self.convert_image_msg_to_cv(image_msg)
+        if cv_image is None:
             return
 
-        # # Publish the annotated image
-        # try:
-        #     self.mask_publisher.publish(
-        #         self.bridge.cv2_to_imgmsg(annotated_image, "bgr8")
-        #     )
-        # except CvBridgeError as e:
-        #     rospy.logerr(f"Error when converting image: {e}")
-        #     return
+        image_H, image_W = cv_image.shape[:2]
+        detections = self.get_detections(cv_image)
+
+        dets = self.reshape_detections(detections, image_H, image_W)
+        online_targets = self.byte_tracker.update(
+            dets, [image_H, image_W], [image_H, image_W]
+        )
+
+        self.assign_tracker_ids(detections, online_targets)
+
+        cv_image_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+        detections.mask = self.sam_segment(
+            self.light_hqsam_predictor, cv_image_rgb, detections.xyxy
+        )
+
+        annotated_image = self.annotate_image(cv_image, detections)
+        self.publish_image(annotated_image)
 
 
 if __name__ == "__main__":
