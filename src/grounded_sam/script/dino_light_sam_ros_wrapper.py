@@ -97,7 +97,6 @@ class LightHQSamServiceNode:
         self.track_thresh = self.get_float_param("~track_thresh", default=0.2)
         self.track_buffer = self.get_float_param("~track_buffer", default=30)
         self.match_thresh = self.get_float_param("~match_thresh", default=0.5)
-        self.mot20 = False
         self.device = self.get_required_param("~device", default="cuda")
 
     def load_grounding_dino(self):
@@ -120,7 +119,6 @@ class LightHQSamServiceNode:
         args.track_thresh = self.track_thresh
         args.track_buffer = self.track_buffer
         args.match_thresh = self.match_thresh
-        args.mot20 = self.mot20
         tracker = BYTETracker(args)
         return tracker
 
@@ -208,7 +206,7 @@ class LightHQSamServiceNode:
         # tlwh[:, 3] = detections.xyxy[:, 3] - detections.xyxy[:, 1]  # height
         # print("tlwh:", tlwh)
         confidence_reshaped = detections.confidence[:, np.newaxis]
-        bounding_box_reshaped = np.copy(detections.xyxy) 
+        bounding_box_reshaped = np.copy(detections.xyxy)
         bounding_box_reshaped[:, [0, 2]] /= image_W
         bounding_box_reshaped[:, [1, 3]] /= image_H
         dets = np.hstack((bounding_box_reshaped, confidence_reshaped))

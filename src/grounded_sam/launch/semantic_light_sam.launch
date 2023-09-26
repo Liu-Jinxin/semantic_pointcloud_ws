@@ -3,7 +3,7 @@
     <node pkg="grounded_sam" type="dino_light_sam_ros_wrapper.py" name="dino_light_sam_ros_node" output="screen">
         <!-- Parameters -->
         <!-- <param name="~text_prompt" value="['keyboard', 'ruler', 'bottle', 'ball', 'cube', 'wireless controller', 'scissors', 'paper']" /> -->
-        <param name="~text_prompt" value="['keyboard', 'wooden block', 'ruler']" />
+        <param name="~text_prompt" value="['keyboard', 'bottle', 'human arm', 'ruler']" />
         <param name="~mask_callback_timer" value="0.01" />
         <param name="~raw_image_topic_name" value="/camera/color/image_raw" />
         <param name="~mask_image_topic_name" value="/semantic_mask_image" />
