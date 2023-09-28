@@ -3,18 +3,20 @@
     <node pkg="grounded_sam" type="dino_light_sam_ros_wrapper.py" name="dino_light_sam_ros_node" output="screen">
         <!-- Parameters -->
         <!-- <param name="~text_prompt" value="['keyboard', 'ruler', 'bottle', 'ball', 'cube', 'wireless controller', 'scissors', 'paper']" /> -->
-        <param name="~text_prompt" value="['keyboard', 'bottle', 'human arm', 'ruler']" />
+        <param name="~text_prompt" value="['red notebook', ' tissues pack', 'yellow screwdriver', 'white plug', 'Glass Cup', 'blue pliers', 'Human Palm']" />
         <param name="~mask_callback_timer" value="0.01" />
         <param name="~raw_image_topic_name" value="/camera/color/image_raw" />
-        <param name="~mask_image_topic_name" value="/semantic_mask_image" />
+        <param name="~depth_image_topic_name" value="/camera/aligned_depth_to_color/image_raw" />
+        <param name="~mask_color_image_topic_name" value="/semantic_mask_color_image" />
+        <param name="~mask_depth_image_topic_name" value="/semantic_mask_depth_image" />
         <param name="~mask_tag_topic_name" value="/semantic_mask_tag" />
         <param name="~dino_config" value="$(find grounded_sam)/script/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py" />
         <param name="~dino_checkpoint" value="$(find grounded_sam)/script/groundingdino_swint_ogc.pth" />
         <param name="~sam_checkpoint" value="$(find grounded_sam)/script/EfficientSAM/sam_hq_vit_tiny.pth" />
-        <param name="~box_threshold" value="0.35" />
-        <param name="~text_threshold" value="0.35" />
+        <param name="~box_threshold" value="0.45" />
+        <param name="~text_threshold" value="0.4" />
         <param name="~nms_threshold" value="0.8" />
-        <param name="~track_thresh" value="0.2" />
+        <param name="~track_thresh" value="0.3" />
         <param name="~track_buffer" value="30" />
         <param name="~match_thresh" value="0.5" />
         <param name="~device" value="cuda" />

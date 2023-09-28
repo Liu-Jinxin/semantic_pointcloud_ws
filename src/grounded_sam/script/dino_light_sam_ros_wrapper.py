@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import rospy
+import message_filters
 from sensor_msgs.msg import Image as ROSImage
 from grounded_sam.msg import StringArrayStamped
 from ByteTrack.yolox.tracker.byte_tracker import BYTETracker
@@ -34,6 +35,7 @@ class LightHQSamServiceNode:
         # To store the latest image
         self.bridge = CvBridge()
         self.latest_image_msg = ROSImage()
+        self.latest_depth_image_msg = ROSImage()
         # To store the latest processed timestamp
         self.last_processed_timestamp = None
         self.box_annotator = sv.BoxAnnotator()
@@ -47,15 +49,25 @@ class LightHQSamServiceNode:
                 self.byte_tracker,
             ) = self.load_all_models()
             # ROS Publishers Subscribers and Timer
-            self.mask_publisher = rospy.Publisher(
-                self.mask_image_topic_name, ROSImage, queue_size=1
+            self.mask_color_publisher = rospy.Publisher(
+                self.mask_color_image_topic_name, ROSImage, queue_size=1
+            )
+            self.mask_depth_publisher = rospy.Publisher(
+                self.mask_depth_image_topic_name, ROSImage, queue_size=1
             )
             self.mask_tag_publisher = rospy.Publisher(
                 self.mask_tag_topic_name, StringArrayStamped, queue_size=1
             )
-            self.image_subscriber = rospy.Subscriber(
-                self.raw_image_topic_name, ROSImage, self.image_callback
+            self.image_subscriber = message_filters.Subscriber(
+                self.raw_image_topic_name, ROSImage
             )
+            self.depth_image_subscriber = message_filters.Subscriber(
+                self.depth_image_topic_name, ROSImage
+            )
+            self.ts = message_filters.TimeSynchronizer(
+                [self.image_subscriber, self.depth_image_subscriber], 10
+            )
+            self.ts.registerCallback(self.time_synchronizer_callback)
             self.timer = rospy.Timer(
                 rospy.Duration(self.mask_callback_timer), self.timer_callback
             )
@@ -85,9 +97,15 @@ class LightHQSamServiceNode:
         self.text_prompt_str = rospy.get_param("~text_prompt", "[]")
         self.text_prompt = yaml.safe_load(self.text_prompt_str)
         self.mask_callback_timer = self.get_float_param("~mask_callback_timer")
-        self.mask_image_topic_name = self.get_required_param("~mask_image_topic_name")
+        self.mask_color_image_topic_name = self.get_required_param(
+            "~mask_color_image_topic_name"
+        )
+        self.mask_depth_image_topic_name = self.get_required_param(
+            "~mask_depth_image_topic_name"
+        )
         self.mask_tag_topic_name = self.get_required_param("~mask_tag_topic_name")
         self.raw_image_topic_name = self.get_required_param("~raw_image_topic_name")
+        self.depth_image_topic_name = self.get_required_param("~depth_image_topic_name")
         self.dino_config = self.get_required_param("~dino_config")
         self.dino_checkpoint = self.get_required_param("~dino_checkpoint")
         self.sam_checkpoint = self.get_required_param("~sam_checkpoint")
@@ -128,8 +146,9 @@ class LightHQSamServiceNode:
         byte_tracker = self.load_byte_tracker()
         return grounding_dino_model, sam_predictor, byte_tracker
 
-    def image_callback(self, image_msg):
+    def time_synchronizer_callback(self, image_msg, depth_image_msg):
         self.latest_image_msg = image_msg
+        self.latest_depth_image_msg = depth_image_msg
 
     def timer_callback(self, timer_event):
         # Check if there's a valid image message before processing
@@ -138,19 +157,27 @@ class LightHQSamServiceNode:
             or not self.latest_image_msg.width
             or not self.latest_image_msg.height
         ):
-            rospy.loginfo("No valid image received yet.")
+            rospy.loginfo("No valid color image received yet.")
+            return
+
+        if (
+            not self.latest_depth_image_msg
+            or not self.latest_depth_image_msg.width
+            or not self.latest_depth_image_msg.height
+        ):
+            rospy.loginfo("No valid depth image received yet.")
             return
 
         # Check if the image message is newer than the last processed one
         current_timestamp = self.latest_image_msg.header.stamp
         if (
             self.last_processed_timestamp
-            and current_timestamp <= self.last_processed_timestamp
+            and current_timestamp == self.last_processed_timestamp
         ):
             rospy.loginfo("No new image received.")
             return
         # Process the image using your models
-        self.generate_mask_and_tags(self.latest_image_msg)
+        self.generate_mask_and_tags(self.latest_image_msg, self.latest_depth_image_msg)
 
         # Update the last processed timestamp
         self.last_processed_timestamp = current_timestamp
@@ -175,6 +202,27 @@ class LightHQSamServiceNode:
             return self.bridge.imgmsg_to_cv2(image_msg, "bgr8")
         except CvBridgeError as e:
             rospy.logerr(f"Error when converting image: {e}")
+            return None
+
+    def convert_depth_image_msg_to_cv(self, depth_image_msg):
+        try:
+            # First, convert the ROS Image message to a CV image
+            depth_image_single_channel = self.bridge.imgmsg_to_cv2(
+                depth_image_msg, desired_encoding="passthrough"
+            )
+            # Normalize the depth image to 0-255 range
+            normalized_depth_image = cv2.normalize(
+                depth_image_single_channel, None, 0, 255, cv2.NORM_MINMAX
+            )
+            # Convert the normalized depth image to 8-bit
+            normalized_depth_image_8bit = normalized_depth_image.astype(np.uint8)
+            # Now convert the single channel depth image to a 3 channel grayscale image
+            depth_image_three_channel = cv2.cvtColor(
+                normalized_depth_image_8bit, cv2.COLOR_GRAY2BGR
+            )
+            return depth_image_three_channel
+        except CvBridgeError as e:
+            rospy.logerr(f"Error when converting depth image: {e}")
             return None
 
     def get_detections(self, cv_image):
@@ -220,11 +268,20 @@ class LightHQSamServiceNode:
         for idx, track_id in zip(tracker_indices, tracker_ids):
             detections.tracker_id[int(idx)] = track_id
 
-    def annotate_image(self, cv_image, detections):
+    def annotate_image(self, cv_image, depth_image, detections):
+        # labels = [
+        #     f"{self.text_prompt[class_id]} {confidence:0.2f}"
+        #     + (f" ID:{tracker_id}" if tracker_id != -1 else "")
+        #     for _, confidence, class_id, tracker_id in zip(
+        #         detections.xyxy,
+        #         detections.confidence,
+        #         detections.class_id,
+        #         detections.tracker_id,
+        #     )
+        # ]
         labels = [
             f"{self.text_prompt[class_id]} {confidence:0.2f}"
-            + (f" ID:{tracker_id}" if tracker_id != -1 else "")
-            for _, confidence, class_id, tracker_id in zip(
+            for _, confidence, class_id, _ in zip(
                 detections.xyxy,
                 detections.confidence,
                 detections.class_id,
@@ -232,19 +289,40 @@ class LightHQSamServiceNode:
             )
         ]
 
-        annotated_image = self.mask_annotator.annotate(cv_image.copy(), detections)
-        return self.box_annotator.annotate(annotated_image, detections, labels)
+        annotated_color_image = self.mask_annotator.annotate(
+            cv_image.copy(), detections
+        )
+        annotated_color_image = self.box_annotator.annotate(
+            annotated_color_image, detections, labels
+        )
+        annotated_depth_image = self.mask_annotator.annotate(
+            depth_image.copy(), detections
+        )
+        return annotated_color_image, annotated_depth_image
 
-    def publish_image(self, cv_image):
+    def publish_image(
+        self, annotated_color_image, annotated_depth_image, image_msg, depth_image_msg
+    ):
         try:
-            self.mask_publisher.publish(self.bridge.cv2_to_imgmsg(cv_image, "bgr8"))
+            color_img_msg = self.bridge.cv2_to_imgmsg(annotated_color_image, "bgr8")
+            color_img_msg.header = (
+                image_msg.header
+            )  # Copy the header from the original image message
+            self.mask_color_publisher.publish(color_img_msg)
         except CvBridgeError as e:
-            rospy.logerr(f"Error when converting image: {e}")
+            rospy.logerr(f"Error when converting color image: {e}")
+        try:
+            depth_img_msg = self.bridge.cv2_to_imgmsg(annotated_depth_image, "bgr8")
+            depth_img_msg.header = (
+                depth_image_msg.header
+            )  # Copy the header from the original depth image message
+            self.mask_depth_publisher.publish(depth_img_msg)
+        except CvBridgeError as e:
+            rospy.logerr(f"Error when converting depth image: {e}")
 
-    def generate_mask_and_tags(self, image_msg):
+    def generate_mask_and_tags(self, image_msg, depth_image_msg):
         cv_image = self.convert_image_msg_to_cv(image_msg)
-        if cv_image is None:
-            return
+        depth_image = self.convert_depth_image_msg_to_cv(depth_image_msg)
 
         image_H, image_W = cv_image.shape[:2]
         detections = self.get_detections(cv_image)
@@ -261,8 +339,12 @@ class LightHQSamServiceNode:
             self.light_hqsam_predictor, cv_image_rgb, detections.xyxy
         )
 
-        annotated_image = self.annotate_image(cv_image, detections)
-        self.publish_image(annotated_image)
+        annotated_color_image, annotated_depth_image = self.annotate_image(
+            cv_image, depth_image, detections
+        )
+        self.publish_image(
+            annotated_color_image, annotated_depth_image, image_msg, depth_image_msg
+        )
 
 
 if __name__ == "__main__":
