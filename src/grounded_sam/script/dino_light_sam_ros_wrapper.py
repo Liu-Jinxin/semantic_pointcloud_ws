@@ -6,10 +6,8 @@ from grounded_sam.msg import StringArrayStamped
 from ByteTrack.yolox.tracker.byte_tracker import BYTETracker
 from std_msgs.msg import String, Header
 from cv_bridge import CvBridge, CvBridgeError
-import re
 import yaml
 import types
-import matplotlib.cm as cm
 
 import cv2
 import numpy as np
