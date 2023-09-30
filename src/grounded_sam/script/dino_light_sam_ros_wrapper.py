@@ -38,6 +38,8 @@ class LightHQSamServiceNode:
         self.last_processed_timestamp = None
         self.box_annotator = sv.BoxAnnotator()
         self.mask_annotator = sv.MaskAnnotator()
+        self.camera_info_k = torch.tensor([601.8538818359375, 0.0, 326.3551330566406, 0.0, 602.1116943359375, 243.3946533203125, 0.0, 0.0, 1.0]).reshape(3,3).cuda()
+        self.inv_camera_info_k = torch.inverse(self.camera_info_k)
         try:
             self.check_and_get_parameters()
             # Load all models
@@ -103,6 +105,7 @@ class LightHQSamServiceNode:
         )
         self.mask_tag_topic_name = self.get_required_param("~mask_tag_topic_name")
         self.raw_image_topic_name = self.get_required_param("~raw_image_topic_name")
+        self.raw_image_info_topic_name = self.get_required_param("~raw_image_info_topic_name")
         self.depth_image_topic_name = self.get_required_param("~depth_image_topic_name")
         self.dino_config = self.get_required_param("~dino_config")
         self.dino_checkpoint = self.get_required_param("~dino_checkpoint")
@@ -208,6 +211,7 @@ class LightHQSamServiceNode:
             depth_image_single_channel = self.bridge.imgmsg_to_cv2(
                 depth_image_msg, desired_encoding="passthrough"
             )
+            depth_tensor = torch.from_numpy(depth_image_single_channel.astype(np.float32)).cuda()
             # Normalize the depth image to 0-255 range
             normalized_depth_image = cv2.normalize(
                 depth_image_single_channel, None, 0, 255, cv2.NORM_MINMAX
@@ -218,7 +222,7 @@ class LightHQSamServiceNode:
             depth_image_three_channel = cv2.cvtColor(
                 normalized_depth_image_8bit, cv2.COLOR_GRAY2BGR
             )
-            return depth_image_three_channel
+            return depth_image_three_channel, depth_tensor
         except CvBridgeError as e:
             rospy.logerr(f"Error when converting depth image: {e}")
             return None
@@ -286,7 +290,6 @@ class LightHQSamServiceNode:
                 detections.tracker_id,
             )
         ]
-
         annotated_color_image = self.mask_annotator.annotate(
             cv_image.copy(), detections
         )
@@ -320,7 +323,7 @@ class LightHQSamServiceNode:
 
     def generate_mask_and_tags(self, image_msg, depth_image_msg):
         cv_image = self.convert_image_msg_to_cv(image_msg)
-        depth_image = self.convert_depth_image_msg_to_cv(depth_image_msg)
+        depth_image, depth_tensor = self.convert_depth_image_msg_to_cv(depth_image_msg)
 
         image_H, image_W = cv_image.shape[:2]
         detections = self.get_detections(cv_image)
@@ -340,9 +343,21 @@ class LightHQSamServiceNode:
         annotated_color_image, annotated_depth_image = self.annotate_image(
             cv_image, depth_image, detections
         )
+        print('mask', self.generate_3dpoint_for_image(image_H, image_W, self.inv_camera_info_k, depth_tensor))
         self.publish_image(
             annotated_color_image, annotated_depth_image, image_msg, depth_image_msg
         )
+    
+    def generate_3dpoint_for_image(self, img_h, img_w, inv_camera_k, depth_tensor):
+        depth_expanded = depth_tensor.unsqueeze(-1)
+        index_h = torch.arange(0, img_h)
+        index_w = torch.arange(0, img_w)
+        yy, xx = torch.meshgrid(index_h, index_w)
+
+        coordinates = torch.stack((xx, yy), dim=0).permute(1, 2, 0).cuda()
+        hom_coord = torch.cat((coordinates, torch.ones_like(coordinates[..., 0:1])), dim=-1).permute(0, 2, 1).float()
+        point_3d = depth_expanded * (torch.matmul(inv_camera_k.unsqueeze(0),  hom_coord).permute(0, 2, 1))
+        return point_3d
 
 
 if __name__ == "__main__":

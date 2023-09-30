@@ -3,10 +3,11 @@
     <node pkg="grounded_sam" type="dino_light_sam_ros_wrapper.py" name="dino_light_sam_ros_node" output="screen">
         <!-- Parameters -->
         <!-- <param name="~text_prompt" value="['keyboard', 'ruler', 'bottle', 'ball', 'cube', 'wireless controller', 'scissors', 'paper']" /> -->
-        <!-- <param name="~text_prompt" value="['red notebook', ' tissues pack', 'yellow screwdriver', 'white plug', 'Glass Cup', 'blue pliers', 'Human Palm']" /> -->
-        <param name="~text_prompt" value="['brown tissues pack', 'Glass Cup', 'blue pliers', 'light pink sponge', 'silver metal ruler']" />
+        <param name="~text_prompt" value="['red notebook', ' tissues pack', 'yellow screwdriver', 'white plug', 'Glass Cup', 'blue pliers', 'Human Palm']" />
+        <!-- <param name="~text_prompt" value="['brown tissues pack', 'Glass Cup', 'blue pliers', 'light pink sponge', 'silver metal ruler']" /> -->
         <param name="~mask_callback_timer" value="0.01" />
         <param name="~raw_image_topic_name" value="/camera/color/image_raw" />
+        <param name="~raw_image_info_topic_name" value="/camera/color/camera_info" />
         <param name="~depth_image_topic_name" value="/camera/aligned_depth_to_color/image_raw" />
         <param name="~mask_color_image_topic_name" value="/semantic_mask_color_image" />
         <param name="~mask_depth_image_topic_name" value="/semantic_mask_depth_image" />
