@@ -11,7 +11,7 @@
         <param name="~depth_image_topic_name" value="/camera/aligned_depth_to_color/image_raw" />
         <param name="~mask_color_image_topic_name" value="/semantic_mask_color_image" />
         <param name="~mask_depth_image_topic_name" value="/semantic_mask_depth_image" />
-        <param name="~mask_tag_topic_name" value="/semantic_mask_tag" />
+        <param name="~objects_info_topic_name" value="/semantic_objects_info" />
         <param name="~dino_config" value="$(find grounded_sam)/script/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py" />
         <param name="~dino_checkpoint" value="$(find grounded_sam)/script/groundingdino_swint_ogc.pth" />
         <param name="~sam_checkpoint" value="$(find grounded_sam)/script/EfficientSAM/sam_hq_vit_tiny.pth" />

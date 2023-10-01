@@ -2,7 +2,8 @@
 import rospy
 import message_filters
 from sensor_msgs.msg import Image as ROSImage
-from grounded_sam.msg import StringArrayStamped
+from sensor_msgs.msg import CameraInfo
+from grounded_sam.msg import ObjectInfo, ObjectsArrayStamped
 from ByteTrack.yolox.tracker.byte_tracker import BYTETracker
 from std_msgs.msg import String, Header
 from cv_bridge import CvBridge, CvBridgeError
@@ -34,12 +35,13 @@ class LightHQSamServiceNode:
         self.bridge = CvBridge()
         self.latest_image_msg = ROSImage()
         self.latest_depth_image_msg = ROSImage()
-        # To store the latest processed timestamp
-        self.last_processed_timestamp = None
+        self.obj_array_msg = ObjectsArrayStamped()
+        self.last_processed_timestamp = None  # To store the latest processed timestamp
         self.box_annotator = sv.BoxAnnotator()
         self.mask_annotator = sv.MaskAnnotator()
-        self.camera_info_k = torch.tensor([601.8538818359375, 0.0, 326.3551330566406, 0.0, 602.1116943359375, 243.3946533203125, 0.0, 0.0, 1.0]).reshape(3,3).cuda()
-        self.inv_camera_info_k = torch.inverse(self.camera_info_k)
+        self.camera_info_callback_count = 0
+        self.MAX_CAMERA_INFO_CALLBACKS = 3  # Change the warmup count here
+        self.pc_without_scale = None
         try:
             self.check_and_get_parameters()
             # Load all models
@@ -55,8 +57,11 @@ class LightHQSamServiceNode:
             self.mask_depth_publisher = rospy.Publisher(
                 self.mask_depth_image_topic_name, ROSImage, queue_size=1
             )
-            self.mask_tag_publisher = rospy.Publisher(
-                self.mask_tag_topic_name, StringArrayStamped, queue_size=1
+            self.objects_info_publisher = rospy.Publisher(
+                self.objects_info_topic_name, ObjectsArrayStamped, queue_size=1
+            )
+            self.camera_info_subscriber = rospy.Subscriber(
+                self.raw_image_info_topic_name, CameraInfo, self.camera_info_callback
             )
             self.image_subscriber = message_filters.Subscriber(
                 self.raw_image_topic_name, ROSImage
@@ -103,9 +108,11 @@ class LightHQSamServiceNode:
         self.mask_depth_image_topic_name = self.get_required_param(
             "~mask_depth_image_topic_name"
         )
-        self.mask_tag_topic_name = self.get_required_param("~mask_tag_topic_name")
+        self.objects_info_topic_name = self.get_required_param("~objects_info_topic_name")
         self.raw_image_topic_name = self.get_required_param("~raw_image_topic_name")
-        self.raw_image_info_topic_name = self.get_required_param("~raw_image_info_topic_name")
+        self.raw_image_info_topic_name = self.get_required_param(
+            "~raw_image_info_topic_name"
+        )
         self.depth_image_topic_name = self.get_required_param("~depth_image_topic_name")
         self.dino_config = self.get_required_param("~dino_config")
         self.dino_checkpoint = self.get_required_param("~dino_checkpoint")
@@ -146,6 +153,37 @@ class LightHQSamServiceNode:
         sam_predictor = self.load_light_hqsam()
         byte_tracker = self.load_byte_tracker()
         return grounding_dino_model, sam_predictor, byte_tracker
+
+    def camera_info_callback(self, camera_info_msg):
+        try:
+            # Check if we reached the max callbacks
+            if self.camera_info_callback_count >= self.MAX_CAMERA_INFO_CALLBACKS:
+                self.camera_info_subscriber.unregister()
+                return
+            camera_info_k = np.array(camera_info_msg.K).reshape(3, 3)
+
+            # Convert the inverse matrix to a PyTorch tensor and send to CUDA
+            inv_camera_info_k = torch.tensor(
+                np.linalg.inv(camera_info_k), dtype=torch.float32
+            ).cuda()
+            index_h = torch.arange(0, camera_info_msg.height)
+            index_w = torch.arange(0, camera_info_msg.width)
+            yy, xx = torch.meshgrid(index_h, index_w)
+            coordinates = torch.stack((xx, yy), dim=0).permute(1, 2, 0).cuda()
+            hom_coord = (
+                torch.cat((coordinates, torch.ones_like(coordinates[..., 0:1])), dim=-1)
+                .permute(0, 2, 1)
+                .float()
+            )
+            self.pc_without_scale = torch.matmul(
+                inv_camera_info_k.unsqueeze(0), hom_coord
+            ).permute(0, 2, 1)
+
+            # Increment the count
+            self.camera_info_callback_count += 1
+
+        except Exception as e:
+            rospy.logerr(f"Error when loading camera info: {e}")
 
     def time_synchronizer_callback(self, image_msg, depth_image_msg):
         self.latest_image_msg = image_msg
@@ -211,7 +249,9 @@ class LightHQSamServiceNode:
             depth_image_single_channel = self.bridge.imgmsg_to_cv2(
                 depth_image_msg, desired_encoding="passthrough"
             )
-            depth_tensor = torch.from_numpy(depth_image_single_channel.astype(np.float32)).cuda()
+            depth_tensor = torch.from_numpy(
+                depth_image_single_channel.astype(np.float32)
+            ).cuda()
             # Normalize the depth image to 0-255 range
             normalized_depth_image = cv2.normalize(
                 depth_image_single_channel, None, 0, 255, cv2.NORM_MINMAX
@@ -301,8 +341,8 @@ class LightHQSamServiceNode:
         )
         return annotated_color_image, annotated_depth_image
 
-    def publish_image(
-        self, annotated_color_image, annotated_depth_image, image_msg, depth_image_msg
+    def publish_ros_msg(
+        self, annotated_color_image, annotated_depth_image, image_msg, depth_image_msg, objects_info_msg
     ):
         try:
             color_img_msg = self.bridge.cv2_to_imgmsg(annotated_color_image, "bgr8")
@@ -320,6 +360,13 @@ class LightHQSamServiceNode:
             self.mask_depth_publisher.publish(depth_img_msg)
         except CvBridgeError as e:
             rospy.logerr(f"Error when converting depth image: {e}")
+        try:
+            self.obj_array_msg.objects = objects_info_msg
+            self.obj_array_msg.header = image_msg.header
+            self.obj_array_msg.size = len(objects_info_msg)
+            self.objects_info_publisher.publish(self.obj_array_msg)
+        except CvBridgeError as e:
+            rospy.logerr(f"Error when publish objects info: {e}")
 
     def generate_mask_and_tags(self, image_msg, depth_image_msg):
         cv_image = self.convert_image_msg_to_cv(image_msg)
@@ -339,24 +386,31 @@ class LightHQSamServiceNode:
         detections.mask = self.sam_segment(
             self.light_hqsam_predictor, cv_image_rgb, detections.xyxy
         )
+        point_cloud_3d = self.generate_3dpoint_for_image(depth_tensor)
+
+        objects_info_msg = []
+        
+        for i, detection in enumerate(detections.xyxy):
+            object_info_msg = ObjectInfo()
+            object_info_msg.semantic_label = self.text_prompt[detections.class_id[i]]  # Assuming class_id is an index into text_prompt
+            object_info_msg.semantic_id = detections.class_id[i]
+            object_info_msg.track_id = detections.tracker_id[i]
+        
+        objects_info_msg.append(object_info_msg)
 
         annotated_color_image, annotated_depth_image = self.annotate_image(
             cv_image, depth_image, detections
         )
-        print('mask', self.generate_3dpoint_for_image(image_H, image_W, self.inv_camera_info_k, depth_tensor))
-        self.publish_image(
-            annotated_color_image, annotated_depth_image, image_msg, depth_image_msg
+        self.publish_ros_msg(
+            annotated_color_image, annotated_depth_image, image_msg, depth_image_msg, objects_info_msg
         )
-    
-    def generate_3dpoint_for_image(self, img_h, img_w, inv_camera_k, depth_tensor):
-        depth_expanded = depth_tensor.unsqueeze(-1)
-        index_h = torch.arange(0, img_h)
-        index_w = torch.arange(0, img_w)
-        yy, xx = torch.meshgrid(index_h, index_w)
 
-        coordinates = torch.stack((xx, yy), dim=0).permute(1, 2, 0).cuda()
-        hom_coord = torch.cat((coordinates, torch.ones_like(coordinates[..., 0:1])), dim=-1).permute(0, 2, 1).float()
-        point_3d = depth_expanded * (torch.matmul(inv_camera_k.unsqueeze(0),  hom_coord).permute(0, 2, 1))
+    def generate_3dpoint_for_image(self, depth_tensor):
+        if self.pc_without_scale is None:
+            return None
+        else:
+            depth_expanded = depth_tensor.unsqueeze(-1)
+            point_3d = depth_expanded * self.pc_without_scale
         return point_3d
 
 

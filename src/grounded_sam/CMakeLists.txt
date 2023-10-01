@@ -11,6 +11,7 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   rospy
   std_msgs
+  geometry_msgs
   message_generation
 )
 
@@ -51,6 +52,8 @@ find_package(catkin REQUIRED COMPONENTS
 add_message_files(
   FILES
   StringArrayStamped.msg
+  ObjectInfo.msg
+  ObjectsArrayStamped.msg
 )
 
 ## Generate services in the 'srv' folder
@@ -71,6 +74,7 @@ add_message_files(
 generate_messages(
   DEPENDENCIES
   std_msgs
+  geometry_msgs
 )
 
 ################################################
@@ -105,7 +109,7 @@ generate_messages(
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES grounded_sam
-  CATKIN_DEPENDS roscpp rospy std_msgs message_runtime
+  CATKIN_DEPENDS roscpp rospy std_msgs geometry_msgs message_runtime
 #  DEPENDS system_lib
 )
 
