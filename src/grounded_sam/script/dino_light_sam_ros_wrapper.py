@@ -390,13 +390,20 @@ class LightHQSamServiceNode:
 
         objects_info_msg = []
         
-        for i, detection in enumerate(detections.xyxy):
+        print("detections: ", detections)
+        print("detections.xyxy: ", detections.xyxy)
+        print("detections.mask: ", detections.mask)
+        for i in range(len(detections.class_id)):
             object_info_msg = ObjectInfo()
             object_info_msg.semantic_label = self.text_prompt[detections.class_id[i]]  # Assuming class_id is an index into text_prompt
             object_info_msg.semantic_id = detections.class_id[i]
             object_info_msg.track_id = detections.tracker_id[i]
+            mask = detections.mask[i]
+            object_points_3d = point_cloud_3d[mask]
+            print("object_points_3d: ", object_points_3d)
+
+            objects_info_msg.append(object_info_msg)
         
-        objects_info_msg.append(object_info_msg)
 
         annotated_color_image, annotated_depth_image = self.annotate_image(
             cv_image, depth_image, detections

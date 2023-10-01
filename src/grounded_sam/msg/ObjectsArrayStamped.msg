@@ -1,3 +1,3 @@
 std_msgs/Header header
-uint8 size
+int32 size
 grounded_sam/ObjectInfo[] objects
