@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
+import os
+import sys
 import rospy
-import message_filters
-from sensor_msgs.msg import Image as ROSImage
-from sensor_msgs.msg import CameraInfo
-from grounded_sam.msg import ObjectInfo, ObjectsArrayStamped
-from ByteTrack.yolox.tracker.byte_tracker import BYTETracker
-from std_msgs.msg import String, Header
-from cv_bridge import CvBridge, CvBridgeError
 import yaml
 import types
-
 import cv2
 import numpy as np
-import supervision as sv
-
 import torch
 import torchvision
-
+import message_filters
+from sensor_msgs.msg import Image as ROSImage, CameraInfo, PointCloud2
+from cv_bridge import CvBridge, CvBridgeError
+from ByteTrack.yolox.tracker.byte_tracker import BYTETracker
+import ros_numpy
+import supervision as sv
 from groundingdino.util.inference import Model
 from segment_anything import SamPredictor
-import sys
 
+# Update the sys.path
 sys.path.append(
-    "/home/appusr/semantic_pointcloud_ws/src/grounded_sam/script/EfficientSAM"
+    os.path.join(
+        "/home/appusr", "semantic_pointcloud_ws/src/grounded_sam/script/EfficientSAM"
+    )
 )
 from EfficientSAM.LightHQSAM.setup_light_hqsam import setup_model
 
@@ -35,47 +34,20 @@ class LightHQSamServiceNode:
         self.bridge = CvBridge()
         self.latest_image_msg = ROSImage()
         self.latest_depth_image_msg = ROSImage()
-        self.obj_array_msg = ObjectsArrayStamped()
         self.last_processed_timestamp = None  # To store the latest processed timestamp
         self.box_annotator = sv.BoxAnnotator()
         self.mask_annotator = sv.MaskAnnotator()
+        self.millimeter2meter = 0.001
         self.camera_info_callback_count = 0
         self.MAX_CAMERA_INFO_CALLBACKS = 3  # Change the warmup count here
         self.pc_without_scale = None
+        self.pc_data = None
         try:
             self.check_and_get_parameters()
             # Load all models
-            (
-                self.grounding_dino_model,
-                self.light_hqsam_predictor,
-                self.byte_tracker,
-            ) = self.load_all_models()
+            self.load_all_models()
             # ROS Publishers Subscribers and Timer
-            self.mask_color_publisher = rospy.Publisher(
-                self.mask_color_image_topic_name, ROSImage, queue_size=1
-            )
-            self.mask_depth_publisher = rospy.Publisher(
-                self.mask_depth_image_topic_name, ROSImage, queue_size=1
-            )
-            self.objects_info_publisher = rospy.Publisher(
-                self.objects_info_topic_name, ObjectsArrayStamped, queue_size=1
-            )
-            self.camera_info_subscriber = rospy.Subscriber(
-                self.raw_image_info_topic_name, CameraInfo, self.camera_info_callback
-            )
-            self.image_subscriber = message_filters.Subscriber(
-                self.raw_image_topic_name, ROSImage
-            )
-            self.depth_image_subscriber = message_filters.Subscriber(
-                self.depth_image_topic_name, ROSImage
-            )
-            self.ts = message_filters.TimeSynchronizer(
-                [self.image_subscriber, self.depth_image_subscriber], 10
-            )
-            self.ts.registerCallback(self.time_synchronizer_callback)
-            self.timer = rospy.Timer(
-                rospy.Duration(self.mask_callback_timer), self.timer_callback
-            )
+            self.initialize_ros_elements()
         except Exception as e:
             rospy.logerr(f"Error during initialization: {e}")
             rospy.signal_shutdown("Error during initialization")
@@ -108,7 +80,9 @@ class LightHQSamServiceNode:
         self.mask_depth_image_topic_name = self.get_required_param(
             "~mask_depth_image_topic_name"
         )
-        self.objects_info_topic_name = self.get_required_param("~objects_info_topic_name")
+        self.objects_info_topic_name = self.get_required_param(
+            "~objects_info_topic_name"
+        )
         self.raw_image_topic_name = self.get_required_param("~raw_image_topic_name")
         self.raw_image_info_topic_name = self.get_required_param(
             "~raw_image_info_topic_name"
@@ -149,10 +123,36 @@ class LightHQSamServiceNode:
         return tracker
 
     def load_all_models(self):
-        grounding_dino_model = self.load_grounding_dino()
-        sam_predictor = self.load_light_hqsam()
-        byte_tracker = self.load_byte_tracker()
-        return grounding_dino_model, sam_predictor, byte_tracker
+        self.grounding_dino_model = self.load_grounding_dino()
+        self.light_hqsam_predictor = self.load_light_hqsam()
+        self.byte_tracker = self.load_byte_tracker()
+
+    def initialize_ros_elements(self):
+        self.mask_color_publisher = rospy.Publisher(
+            self.mask_color_image_topic_name, ROSImage, queue_size=1
+        )
+        self.mask_depth_publisher = rospy.Publisher(
+            self.mask_depth_image_topic_name, ROSImage, queue_size=1
+        )
+        self.objects_info_publisher = rospy.Publisher(
+            self.objects_info_topic_name, PointCloud2, queue_size=1
+        )
+        self.camera_info_subscriber = rospy.Subscriber(
+            self.raw_image_info_topic_name, CameraInfo, self.camera_info_callback
+        )
+        self.image_subscriber = message_filters.Subscriber(
+            self.raw_image_topic_name, ROSImage
+        )
+        self.depth_image_subscriber = message_filters.Subscriber(
+            self.depth_image_topic_name, ROSImage
+        )
+        self.ts = message_filters.TimeSynchronizer(
+            [self.image_subscriber, self.depth_image_subscriber], 10
+        )
+        self.ts.registerCallback(self.time_synchronizer_callback)
+        self.timer = rospy.Timer(
+            rospy.Duration(self.mask_callback_timer), self.timer_callback
+        )
 
     def camera_info_callback(self, camera_info_msg):
         try:
@@ -178,7 +178,20 @@ class LightHQSamServiceNode:
             self.pc_without_scale = torch.matmul(
                 inv_camera_info_k.unsqueeze(0), hom_coord
             ).permute(0, 2, 1)
-
+            camera_data_lenth = camera_info_msg.width * camera_info_msg.height
+            self.pc_data = np.zeros(
+                camera_data_lenth,
+                dtype=[
+                    ("x", np.float32),
+                    ("y", np.float32),
+                    ("z", np.float32),
+                    ("r", np.float32),
+                    ("g", np.float32),
+                    ("b", np.float32),
+                    ("semantic_id", np.int8),
+                    ("track_id", np.int8),
+                ],
+            )
             # Increment the count
             self.camera_info_callback_count += 1
 
@@ -250,7 +263,7 @@ class LightHQSamServiceNode:
                 depth_image_msg, desired_encoding="passthrough"
             )
             depth_tensor = torch.from_numpy(
-                depth_image_single_channel.astype(np.float32)
+                (self.millimeter2meter * depth_image_single_channel).astype(np.float32)
             ).cuda()
             # Normalize the depth image to 0-255 range
             normalized_depth_image = cv2.normalize(
@@ -342,7 +355,12 @@ class LightHQSamServiceNode:
         return annotated_color_image, annotated_depth_image
 
     def publish_ros_msg(
-        self, annotated_color_image, annotated_depth_image, image_msg, depth_image_msg, objects_info_msg
+        self,
+        annotated_color_image,
+        annotated_depth_image,
+        image_msg,
+        depth_image_msg,
+        pc_msg,
     ):
         try:
             color_img_msg = self.bridge.cv2_to_imgmsg(annotated_color_image, "bgr8")
@@ -361,12 +379,12 @@ class LightHQSamServiceNode:
         except CvBridgeError as e:
             rospy.logerr(f"Error when converting depth image: {e}")
         try:
-            self.obj_array_msg.objects = objects_info_msg
-            self.obj_array_msg.header = image_msg.header
-            self.obj_array_msg.size = len(objects_info_msg)
-            self.objects_info_publisher.publish(self.obj_array_msg)
+            pc_msg.header = (
+                image_msg.header
+            )  # Copy the header from the original image message
+            self.objects_info_publisher.publish(pc_msg)
         except CvBridgeError as e:
-            rospy.logerr(f"Error when publish objects info: {e}")
+            rospy.logerr(f"Error when converting point cloud: {e}")
 
     def generate_mask_and_tags(self, image_msg, depth_image_msg):
         cv_image = self.convert_image_msg_to_cv(image_msg)
@@ -386,31 +404,53 @@ class LightHQSamServiceNode:
         detections.mask = self.sam_segment(
             self.light_hqsam_predictor, cv_image_rgb, detections.xyxy
         )
-        point_cloud_3d = self.generate_3dpoint_for_image(depth_tensor)
-
-        objects_info_msg = []
-        
-        print("detections: ", detections)
-        print("detections.xyxy: ", detections.xyxy)
-        print("detections.mask: ", detections.mask)
-        for i in range(len(detections.class_id)):
-            object_info_msg = ObjectInfo()
-            object_info_msg.semantic_label = self.text_prompt[detections.class_id[i]]  # Assuming class_id is an index into text_prompt
-            object_info_msg.semantic_id = detections.class_id[i]
-            object_info_msg.track_id = detections.tracker_id[i]
-            mask = detections.mask[i]
-            object_points_3d = point_cloud_3d[mask]
-            print("object_points_3d: ", object_points_3d)
-
-            objects_info_msg.append(object_info_msg)
-        
-
+        pc_msg = self.generate_semantic_point_cloud_msg(
+            depth_tensor, image_H, image_W, detections, cv_image_rgb
+        )
         annotated_color_image, annotated_depth_image = self.annotate_image(
             cv_image, depth_image, detections
         )
-        self.publish_ros_msg(
-            annotated_color_image, annotated_depth_image, image_msg, depth_image_msg, objects_info_msg
-        )
+        if (
+            (pc_msg is not None)
+            and (image_msg is not None)
+            and (depth_image_msg is not None)
+        ):
+            self.publish_ros_msg(
+                annotated_color_image,
+                annotated_depth_image,
+                image_msg,
+                depth_image_msg,
+                pc_msg,
+            )
+        else:
+            rospy.logerr("Error when generating point cloud")
+        return
+
+    def generate_semantic_point_cloud_msg(
+        self, depth_tensor, image_H, image_W, detections, cv_image_rgb
+    ):
+        point_cloud_3d = self.generate_3dpoint_for_image(depth_tensor)
+        semantic_id_mask = -1 * np.ones((image_H, image_W), dtype=np.int8)
+        track_id_mask = -1 * np.ones((image_H, image_W), dtype=np.int8)
+        for idx, mask in enumerate(detections.mask):
+            semantic_id_mask[mask] = detections.class_id[idx]
+            track_id_mask[mask] = detections.tracker_id[idx]
+        if (point_cloud_3d is None) or (self.pc_data is None):
+            rospy.logerr("Point cloud is None")
+            return None
+        else:
+            point_cloud_3d = point_cloud_3d.detach().cpu().numpy()
+            cv_reshape = cv_image_rgb.reshape(-1, 3)
+            self.pc_data["x"] = point_cloud_3d[:, :, 0].reshape(-1)
+            self.pc_data["y"] = point_cloud_3d[:, :, 1].reshape(-1)
+            self.pc_data["z"] = point_cloud_3d[:, :, 2].reshape(-1)
+            self.pc_data["r"] = cv_reshape[:, 0] / 255.0
+            self.pc_data["g"] = cv_reshape[:, 1] / 255.0
+            self.pc_data["b"] = cv_reshape[:, 2] / 255.0
+            self.pc_data["semantic_id"] = semantic_id_mask.reshape(-1)
+            self.pc_data["track_id"] = track_id_mask.reshape(-1)
+            pointcloud_msg = ros_numpy.msgify(PointCloud2, self.pc_data)
+            return pointcloud_msg
 
     def generate_3dpoint_for_image(self, depth_tensor):
         if self.pc_without_scale is None:
